@@ -1,210 +1,263 @@
-const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits } = require('discord.js');
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 const mongoose = require('mongoose');
 const express = require('express');
 const crypto = require('crypto');
 
-// --- 1. WEB SUNUCUSU (Lisans Kontrol API) ---
+// --- EXPRESS WEB SUNUCUSU (Lisans Doğrulama API'si) ---
 const app = express();
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
-// --- 2. VERİTABANI MODELİ ---
+app.get('/', (req, res) => {
+    res.send('Lisans Dogrulama Sunucusu Calisiyor.');
+});
+
+// --- MONGODB MODELİ ---
 const licenseSchema = new mongoose.Schema({
     key: { type: String, required: true, unique: true },
-    durationDays: { type: Number, required: true },
-    hwid: { type: String, default: null },
+    days: { type: Number, required: true },
     createdAt: { type: Date, default: Date.now },
     activatedAt: { type: Date, default: null },
     expiresAt: { type: Date, default: null },
-    createdBy: { type: String, default: 'Admin' }
+    hwid: { type: String, default: null },
+    createdBy: { type: String, required: true },
+    status: { type: String, default: 'active' } // active, expired
 });
 
 const License = mongoose.model('License', licenseSchema);
 
-// --- 3. LİSANS DOĞRULAMA API ---
+// --- API: LİSANS DOĞRULAMA ENDPOINT'İ ---
 app.post('/api/verify', async (req, res) => {
     try {
-        const { key, hwid } = req.body;
+        const { licenseKey, hwid } = req.body;
 
-        if (!key || !hwid) {
-            return res.status(400).json({ success: false, message: 'Anahtar veya HWID eksik.' });
+        if (!licenseKey) {
+            return res.status(400).json({ valid: false, message: 'Lisans anahtari gerekli.' });
         }
 
-        const license = await License.findOne({ key: key.trim() });
+        const license = await License.findOne({ key: licenseKey.trim().toUpperCase() });
 
         if (!license) {
-            return res.status(404).json({ success: false, message: 'Gecersiz lisans anahtari.' });
+            return res.status(404).json({ valid: false, message: 'Gecersiz lisans anahtari.' });
         }
 
-        // İlk aktivasyon
+        const now = new Date();
+
+        // Lisans süresi dolmuş mu kontrolü
+        if (license.expiresAt && now > license.expiresAt) {
+            license.status = 'expired';
+            await license.save();
+            return res.status(403).json({ valid: false, message: 'Lisans suresi dolmus.' });
+        }
+
+        // İlk kez aktive ediliyorsa
         if (!license.activatedAt) {
-            const now = new Date();
             license.activatedAt = now;
-            license.hwid = hwid;
-            license.expiresAt = new Date(now.getTime() + license.durationDays * 24 * 60 * 60 * 1000);
+            const expireDate = new Date(now.getTime() + license.days * 24 * 60 * 60 * 1000);
+            license.expiresAt = expireDate;
+            license.hwid = hwid || null;
             await license.save();
 
-            return res.json({
-                success: true,
-                message: 'Lisans basariyla aktive edildi!',
-                expiresAt: license.expiresAt
-            });
+            return res.json({ valid: true, message: 'Lisans aktive edildi.', expiresAt: license.expiresAt });
         }
 
-        // Süre kontrolü
-        if (new Date() > license.expiresAt) {
-            return res.status(403).json({ success: false, message: 'Lisans sureniz dolmustur.' });
+        // Donanım (HWID) kontrolü
+        if (license.hwid && hwid && license.hwid !== hwid) {
+            return res.status(403).json({ valid: false, message: 'Bu lisans baska bir cihaza baglidir.' });
         }
 
-        // HWID kontrolü
-        if (license.hwid !== hwid) {
-            return res.status(403).json({ success: false, message: 'Bu lisans baska bir bilgisayara kayitli!' });
-        }
+        return res.json({ valid: true, message: 'Lisans gecerli.', expiresAt: license.expiresAt });
 
-        return res.json({
-            success: true,
-            message: 'Lisans gecerli.',
-            expiresAt: license.expiresAt
-        });
-
-    } catch (err) {
-        return res.status(500).json({ success: false, message: 'Sunucu hatasi meydana geldi.' });
+    } catch (error) {
+        console.error('Doğrulama hatası:', error);
+        return res.status(500).json({ valid: false, message: 'Sunucu hatasi.' });
     }
 });
 
-app.get('/', (req, res) => res.send('Lisans Dogrulama Sunucusu Calisiyor.'));
-
-// --- 4. DISCORD BOTU ---
-const client = new Client({
-    intents: [GatewayIntentBits.Guilds]
-});
+// --- DISCORD BOTU ---
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 const commands = [
     new SlashCommandBuilder()
         .setName('lisans-olustur')
         .setDescription('Yeni bir lisans anahtarı üretir')
-        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-        .addIntegerOption(opt => 
-            opt.setName('gun')
-               .setDescription('Lisans süresi kaç gün olacak?')
-               .setRequired(true)
-        ),
+        .addIntegerOption(option => 
+            option.setName('gun')
+                .setDescription('Lisans süresi (gün olarak)')
+                .setRequired(true))
+        .toJSON(),
     new SlashCommandBuilder()
         .setName('lisans-bilgi')
         .setDescription('Lisans durumunu sorgular')
-        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-        .addStringOption(opt => 
-            opt.setName('anahtar')
-               .setDescription('Sorgulanacak lisans anahtarı')
-               .setRequired(true)
-        ),
+        .addStringOption(option => 
+            option.setName('anahtar')
+                .setDescription('Sorgulanacak lisans anahtarı')
+                .setRequired(true))
+        .toJSON(),
+    new SlashCommandBuilder()
+        .setName('lisans-sil')
+        .setDescription('Bir lisans anahtarını veritabanından tamamen siler')
+        .addStringOption(option => 
+            option.setName('anahtar')
+                .setDescription('Silinecek lisans anahtarı')
+                .setRequired(true))
+        .toJSON(),
     new SlashCommandBuilder()
         .setName('hwid-sifirla')
         .setDescription('Lisansın donanım kilidini sıfırlar')
-        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-        .addStringOption(opt => 
-            opt.setName('anahtar')
-               .setDescription('HWID sıfırlanacak lisans anahtarı')
-               .setRequired(true)
-        )
+        .addStringOption(option => 
+            option.setName('anahtar')
+                .setDescription('HWID sıfırlanacak lisans anahtarı')
+                .setRequired(true))
+        .toJSON()
 ];
 
-async function registerCommands(token, clientId) {
-    const rest = new REST({ version: '10' }).setToken(token);
-    try {
-        await rest.put(Routes.applicationCommands(clientId), { body: commands });
-        console.log('Komutlar Discord API ye kaydedildi.');
-    } catch (error) {
-        console.error('Komut kayit hatasi:', error);
-    }
-}
-
+// --- BOT KOMUT ETKİLEŞİMLERİ ---
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
 
-    const { commandName } = interaction;
+    const { commandName, options } = interaction;
 
     if (commandName === 'lisans-olustur') {
-        const gun = interaction.options.getInteger('gun');
-        const randomKey = 'KEY-' + crypto.randomBytes(4).toString('hex').toUpperCase() + '-' + crypto.randomBytes(4).toString('hex').toUpperCase();
+        const gun = options.getInteger('gun');
+        const randomPart1 = crypto.randomBytes(4).toString('hex').toUpperCase();
+        const randomPart2 = crypto.randomBytes(4).toString('hex').toUpperCase();
+        const licenseKey = `KEY-${randomPart1}-${randomPart2}`;
 
-        const newLicense = new License({
-            key: randomKey,
-            durationDays: gun,
-            createdBy: interaction.user.tag
-        });
+        try {
+            const newLicense = new License({
+                key: licenseKey,
+                days: gun,
+                createdBy: interaction.user.tag
+            });
 
-        await newLicense.save();
+            await newLicense.save();
 
-        const embed = new EmbedBuilder()
-            .setTitle('🔑 Yeni Lisans Oluşturuldu')
-            .setColor(0x00FF7F)
-            .addFields(
-                { name: 'Lisans Anahtarı', value: `\`${randomKey}\``, inline: false },
-                { name: 'Süre', value: `${gun} Gün`, inline: true },
-                { name: 'Oluşturan', value: `<@${interaction.user.id}>`, inline: true }
-            )
-            .setTimestamp();
+            const embed = new EmbedBuilder()
+                .setTitle('🔑 Yeni Lisans Oluşturuldu')
+                .setColor(0x2ecc71)
+                .addFields(
+                    { name: 'Lisans Anahtarı', value: `\`${licenseKey}\``, inline: false },
+                    { name: 'Süre', value: `${gun} Gün`, inline: true },
+                    { name: 'Oluşturan', value: `<@${interaction.user.id}>`, inline: true }
+                )
+                .setTimestamp();
 
-        return interaction.reply({ embeds: [embed] });
+            await interaction.reply({ embeds: [embed] });
+        } catch (error) {
+            console.error(error);
+            await interaction.reply({ content: 'Lisans oluşturulurken bir hata meydana geldi.', ephemeral: true });
+        }
     }
 
     if (commandName === 'lisans-bilgi') {
-        const key = interaction.options.getString('anahtar').trim();
-        const license = await License.findOne({ key });
+        const key = options.getString('anahtar').trim().toUpperCase();
 
-        if (!license) {
-            return interaction.reply({ content: '❌ Belirtilen lisans bulunamadı.', ephemeral: true });
+        try {
+            const license = await License.findOne({ key });
+
+            if (!license) {
+                return interaction.reply({ content: '❌ Belirtilen lisans anahtarı bulunamadı.', ephemeral: true });
+            }
+
+            const embed = new EmbedBuilder()
+                .setTitle('📄 Lisans Bilgileri')
+                .setColor(0x3498db)
+                .addFields(
+                    { name: 'Anahtar', value: `\`${license.key}\``, inline: false },
+                    { name: 'Tanımlı Gün', value: `${license.days} Gün`, inline: true },
+                    { name: 'Durum', value: license.activatedAt ? (new Date() > license.expiresAt ? '🔴 Süresi Dolmuş' : '🟢 Aktif') : '🟡 Beklemede (Kullanılmadı)', inline: true },
+                    { name: 'Bağlı HWID', value: license.hwid ? `\`${license.hwid}\`` : 'Bağlı Değil', inline: false },
+                    { name: 'Oluşturan', value: license.createdBy, inline: true }
+                )
+                .setTimestamp();
+
+            if (license.expiresAt) {
+                embed.addFields({ name: 'Bitiş Tarihi', value: `<t:${Math.floor(license.expiresAt.getTime() / 1000)}:F>`, inline: false });
+            }
+
+            await interaction.reply({ embeds: [embed] });
+        } catch (error) {
+            console.error(error);
+            await interaction.reply({ content: 'Sorgulama yapılırken hata oluştu.', ephemeral: true });
         }
+    }
 
-        const embed = new EmbedBuilder()
-            .setTitle('📋 Lisans Bilgileri')
-            .setColor(0x3498DB)
-            .addFields(
-                { name: 'Anahtar', value: `\`${license.key}\``, inline: false },
-                { name: 'Tanımlı Gün', value: `${license.durationDays} Gün`, inline: true },
-                { name: 'Durum', value: license.activatedAt ? 'Aktif' : 'Beklemede (Kullanılmadı)', inline: true },
-                { name: 'Bağlı HWID', value: license.hwid ? `\`${license.hwid}\`` : 'Yok', inline: false },
-                { name: 'Bitiş Tarihi', value: license.expiresAt ? license.expiresAt.toLocaleString('tr-TR') : 'Başlatılmadı', inline: false }
-            )
-            .setTimestamp();
+    if (commandName === 'lisans-sil') {
+        const key = options.getString('anahtar').trim().toUpperCase();
 
-        return interaction.reply({ embeds: [embed], ephemeral: true });
+        try {
+            const deleted = await License.findOneAndDelete({ key });
+
+            if (!deleted) {
+                return interaction.reply({ content: '❌ Silinmek istenen lisans anahtarı veritabanında bulunamadı.', ephemeral: true });
+            }
+
+            const embed = new EmbedBuilder()
+                .setTitle('🗑️ Lisans Silindi')
+                .setColor(0xe74c3c)
+                .setDescription(`\`${key}\` anahtarı veritabanından başarıyla silindi.`)
+                .setTimestamp();
+
+            await interaction.reply({ embeds: [embed] });
+        } catch (error) {
+            console.error(error);
+            await interaction.reply({ content: 'Lisans silinirken hata oluştu.', ephemeral: true });
+        }
     }
 
     if (commandName === 'hwid-sifirla') {
-        const key = interaction.options.getString('anahtar').trim();
-        const license = await License.findOne({ key });
+        const key = options.getString('anahtar').trim().toUpperCase();
 
-        if (!license) {
-            return interaction.reply({ content: '❌ Belirtilen lisans bulunamadı.', ephemeral: true });
+        try {
+            const license = await License.findOne({ key });
+
+            if (!license) {
+                return interaction.reply({ content: '❌ Belirtilen lisans anahtarı bulunamadı.', ephemeral: true });
+            }
+
+            license.hwid = null;
+            await license.save();
+
+            const embed = new EmbedBuilder()
+                .setTitle('🔄 Donanım Kilidi (HWID) Sıfırlandı')
+                .setColor(0xf1c40f)
+                .setDescription(`\`${key}\` lisansına ait HWID başarıyla sıfırlandı. Yeni bir cihazda kullanılabilir.`)
+                .setTimestamp();
+
+            await interaction.reply({ embeds: [embed] });
+        } catch (error) {
+            console.error(error);
+            await interaction.reply({ content: 'HWID sıfırlanırken hata oluştu.', ephemeral: true });
         }
-
-        license.hwid = null;
-        await license.save();
-
-        return interaction.reply({ content: `✅ \`${key}\` lisansının donanım kilidi (HWID) sıfırlandı.`, ephemeral: true });
     }
 });
 
-// --- 5. BAŞLATMA ---
-async function start() {
+// --- BAŞLATMA FONKSİYONU ---
+async function startServer() {
     try {
-        await mongoose.connect(process.env.MONGO_URI);
+        await mongoose.connect(process.env.MONGODB_URI);
         console.log('MongoDB baglantisi basarili.');
 
         app.listen(PORT, () => {
             console.log(`Sunucu ${PORT} portunda dinleniyor.`);
         });
 
+        const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+        console.log('Komutlar Discord API ye kaydediliyor...');
+        await rest.put(
+            Routes.applicationCommands(process.env.CLIENT_ID),
+            { body: commands }
+        );
+        console.log('Komutlar Discord API ye kaydedildi.');
+
         await client.login(process.env.DISCORD_TOKEN);
         console.log(`Bot giris yapti: ${client.user.tag}`);
 
-        await registerCommands(process.env.DISCORD_TOKEN, client.user.id);
     } catch (err) {
-        console.error('Sistem baslatma hatasi:', err);
+        console.error('Baslatma hatasi:', err);
     }
 }
 
-start();
+startServer();
