@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 const express = require('express');
 const crypto = require('crypto');
 
-// --- EXPRESS WEB SUNUCUSU (Lisans Doğrulama API'si) ---
+// --- EXPRESS WEB SUNUCUSU (Render & Minecraft Mod API) ---
 const app = express();
 app.use(express.json());
 
@@ -13,7 +13,7 @@ app.get('/', (req, res) => {
     res.send('Lisans Dogrulama Sunucusu Calisiyor.');
 });
 
-// --- MONGODB MODELİ ---
+// --- MONGODB LİSANS ŞEMASI ---
 const licenseSchema = new mongoose.Schema({
     key: { type: String, required: true, unique: true },
     days: { type: Number, required: true },
@@ -27,7 +27,7 @@ const licenseSchema = new mongoose.Schema({
 
 const License = mongoose.model('License', licenseSchema);
 
-// --- API: LİSANS DOĞRULAMA ENDPOINT'İ ---
+// --- MOD İÇİN LİSANS DOĞRULAMA API'Sİ ---
 app.post('/api/verify', async (req, res) => {
     try {
         const { licenseKey, hwid } = req.body;
@@ -36,7 +36,8 @@ app.post('/api/verify', async (req, res) => {
             return res.status(400).json({ valid: false, message: 'Lisans anahtari gerekli.' });
         }
 
-        const license = await License.findOne({ key: licenseKey.trim().toUpperCase() });
+        const cleanKey = licenseKey.trim().toUpperCase();
+        const license = await License.findOne({ key: cleanKey });
 
         if (!license) {
             return res.status(404).json({ valid: false, message: 'Gecersiz lisans anahtari.' });
@@ -44,14 +45,14 @@ app.post('/api/verify', async (req, res) => {
 
         const now = new Date();
 
-        // Lisans süresi dolmuş mu kontrolü
+        // Süre kontrolü
         if (license.expiresAt && now > license.expiresAt) {
             license.status = 'expired';
             await license.save();
             return res.status(403).json({ valid: false, message: 'Lisans suresi dolmus.' });
         }
 
-        // İlk kez aktive ediliyorsa
+        // İlk aktivasyon
         if (!license.activatedAt) {
             license.activatedAt = now;
             const expireDate = new Date(now.getTime() + license.days * 24 * 60 * 60 * 1000);
@@ -59,7 +60,12 @@ app.post('/api/verify', async (req, res) => {
             license.hwid = hwid || null;
             await license.save();
 
-            return res.json({ valid: true, message: 'Lisans aktive edildi.', expiresAt: license.expiresAt });
+            return res.json({ 
+                valid: true, 
+                message: 'Lisans basariyla aktive edildi.', 
+                owner: license.createdBy,
+                expiresAt: license.expiresAt 
+            });
         }
 
         // Donanım (HWID) kontrolü
@@ -67,15 +73,20 @@ app.post('/api/verify', async (req, res) => {
             return res.status(403).json({ valid: false, message: 'Bu lisans baska bir cihaza baglidir.' });
         }
 
-        return res.json({ valid: true, message: 'Lisans gecerli.', expiresAt: license.expiresAt });
+        return res.json({ 
+            valid: true, 
+            message: 'Lisans gecerli.', 
+            owner: license.createdBy,
+            expiresAt: license.expiresAt 
+        });
 
     } catch (error) {
-        console.error('Doğrulama hatası:', error);
+        console.error('API Dogrulama Hatasi:', error);
         return res.status(500).json({ valid: false, message: 'Sunucu hatasi.' });
     }
 });
 
-// --- DISCORD BOTU ---
+// --- DISCORD BOTU VE KOMUTLARI ---
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 const commands = [
@@ -113,7 +124,7 @@ const commands = [
         .toJSON()
 ];
 
-// --- BOT KOMUT ETKİLEŞİMLERİ ---
+// --- DISCORD ETKİLEŞİM YÖNETİCİSİ ---
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
 
@@ -146,8 +157,8 @@ client.on('interactionCreate', async interaction => {
 
             await interaction.reply({ embeds: [embed] });
         } catch (error) {
-            console.error(error);
-            await interaction.reply({ content: 'Lisans oluşturulurken bir hata meydana geldi.', ephemeral: true });
+            console.error('Lisans Olusturma Hatasi:', error);
+            await interaction.reply({ content: 'Lisans oluşturulurken hata oluştu.', ephemeral: true });
         }
     }
 
@@ -161,13 +172,18 @@ client.on('interactionCreate', async interaction => {
                 return interaction.reply({ content: '❌ Belirtilen lisans anahtarı bulunamadı.', ephemeral: true });
             }
 
+            let durumText = '🟡 Beklemede (Kullanılmadı)';
+            if (license.activatedAt) {
+                durumText = (license.expiresAt && new Date() > license.expiresAt) ? '🔴 Süresi Dolmuş' : '🟢 Aktif';
+            }
+
             const embed = new EmbedBuilder()
                 .setTitle('📄 Lisans Bilgileri')
                 .setColor(0x3498db)
                 .addFields(
                     { name: 'Anahtar', value: `\`${license.key}\``, inline: false },
                     { name: 'Tanımlı Gün', value: `${license.days} Gün`, inline: true },
-                    { name: 'Durum', value: license.activatedAt ? (new Date() > license.expiresAt ? '🔴 Süresi Dolmuş' : '🟢 Aktif') : '🟡 Beklemede (Kullanılmadı)', inline: true },
+                    { name: 'Durum', value: durumText, inline: true },
                     { name: 'Bağlı HWID', value: license.hwid ? `\`${license.hwid}\`` : 'Bağlı Değil', inline: false },
                     { name: 'Oluşturan', value: license.createdBy, inline: true }
                 )
@@ -179,7 +195,7 @@ client.on('interactionCreate', async interaction => {
 
             await interaction.reply({ embeds: [embed] });
         } catch (error) {
-            console.error(error);
+            console.error('Lisans Bilgi Hatasi:', error);
             await interaction.reply({ content: 'Sorgulama yapılırken hata oluştu.', ephemeral: true });
         }
     }
@@ -197,12 +213,12 @@ client.on('interactionCreate', async interaction => {
             const embed = new EmbedBuilder()
                 .setTitle('🗑️ Lisans Silindi')
                 .setColor(0xe74c3c)
-                .setDescription(`\`${key}\` anahtarı veritabanından başarıyla silindi.`)
+                .setDescription(`\`${key}\` anahtarı veritabanından tamamen silindi.`)
                 .setTimestamp();
 
             await interaction.reply({ embeds: [embed] });
         } catch (error) {
-            console.error(error);
+            console.error('Lisans Silme Hatasi:', error);
             await interaction.reply({ content: 'Lisans silinirken hata oluştu.', ephemeral: true });
         }
     }
@@ -221,14 +237,14 @@ client.on('interactionCreate', async interaction => {
             await license.save();
 
             const embed = new EmbedBuilder()
-                .setTitle('🔄 Donanım Kilidi (HWID) Sıfırlandı')
+                .setTitle('🔄 HWID Kilidi Sıfırlandı')
                 .setColor(0xf1c40f)
-                .setDescription(`\`${key}\` lisansına ait HWID başarıyla sıfırlandı. Yeni bir cihazda kullanılabilir.`)
+                .setDescription(`\`${key}\` lisansına ait donanım kilidi sıfırlandı. Yeni cihazda kullanılabilir.`)
                 .setTimestamp();
 
             await interaction.reply({ embeds: [embed] });
         } catch (error) {
-            console.error(error);
+            console.error('HWID Sifirlama Hatasi:', error);
             await interaction.reply({ content: 'HWID sıfırlanırken hata oluştu.', ephemeral: true });
         }
     }
@@ -237,23 +253,36 @@ client.on('interactionCreate', async interaction => {
 // --- BAŞLATMA FONKSİYONU ---
 async function startServer() {
     try {
-        await mongoose.connect(process.env.MONGODB_URI);
+        const mongoUri = process.env.MONGODB_URI || process.env.MONGO_URI || process.env.DATABASE_URL;
+        const discordToken = process.env.DISCORD_TOKEN || process.env.TOKEN;
+        const clientId = process.env.CLIENT_ID || process.env.APPLICATION_ID;
+
+        if (!mongoUri) {
+            console.error('HATA: MongoDB bağlantı linki bulunamadı! Render Environment Variables kısmını kontrol edin.');
+            return;
+        }
+
+        await mongoose.connect(mongoUri);
         console.log('MongoDB baglantisi basarili.');
 
         app.listen(PORT, () => {
             console.log(`Sunucu ${PORT} portunda dinleniyor.`);
         });
 
-        const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
-        console.log('Komutlar Discord API ye kaydediliyor...');
-        await rest.put(
-            Routes.applicationCommands(process.env.CLIENT_ID),
-            { body: commands }
-        );
-        console.log('Komutlar Discord API ye kaydedildi.');
+        if (discordToken && clientId) {
+            const rest = new REST({ version: '10' }).setToken(discordToken);
+            console.log('Komutlar Discord API ye kaydediliyor...');
+            await rest.put(
+                Routes.applicationCommands(clientId),
+                { body: commands }
+            );
+            console.log('Komutlar Discord API ye kaydedildi.');
 
-        await client.login(process.env.DISCORD_TOKEN);
-        console.log(`Bot giris yapti: ${client.user.tag}`);
+            await client.login(discordToken);
+            console.log(`Bot giris yapti: ${client.user.tag}`);
+        } else {
+            console.warn('UYARI: DISCORD_TOKEN veya CLIENT_ID eksik olduğu için bot başlatılamadı.');
+        }
 
     } catch (err) {
         console.error('Baslatma hatasi:', err);
