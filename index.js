@@ -151,144 +151,159 @@ const commands = [
     new SlashCommandBuilder()
         .setName('lisans-olustur')
         .setDescription('Yeni bir lisans anahtarı üretir')
-        .addIntegerOption(opt => opt.setName('gun').setDescription('Süre (Gün)').setRequired(true))
-        .toJSON(),
+        .addIntegerOption(opt => opt.setName('gun').setDescription('Süre (Gün)').setRequired(true)),
     new SlashCommandBuilder()
         .setName('lisans-bilgi')
         .setDescription('Lisans durumunu ve kalan süreyi detaylı sorgular')
-        .addStringOption(opt => opt.setName('anahtar').setDescription('Lisans Anahtarı').setRequired(true))
-        .toJSON(),
+        .addStringOption(opt => opt.setName('anahtar').setDescription('Lisans Anahtarı').setRequired(true)),
     new SlashCommandBuilder()
         .setName('lisans-sil')
         .setDescription('Lisansı veritabanından siler')
-        .addStringOption(opt => opt.setName('anahtar').setDescription('Lisans Anahtarı').setRequired(true))
-        .toJSON(),
+        .addStringOption(opt => opt.setName('anahtar').setDescription('Lisans Anahtarı').setRequired(true)),
     new SlashCommandBuilder()
         .setName('hwid-sifirla')
         .setDescription('Donanım kilidini ve kayıtlı hesapları sıfırlar')
-        .addStringOption(opt => opt.setName('anahtar').setDescription('Lisans Anahtarı').setRequired(true))
-        .toJSON(),
+        .addStringOption(opt => opt.setName('anahtar').setDescription('Lisans Anahtarı').setRequired(true)),
     new SlashCommandBuilder()
         .setName('guncelleme-ayarla')
         .setDescription('Modun yeni sürümünü ve indirme linkini belirler')
         .addStringOption(opt => opt.setName('surum').setDescription('Örn: 1.0.1').setRequired(true))
         .addStringOption(opt => opt.setName('link').setDescription('Yeni .jar linki').setRequired(true))
-        .toJSON()
-];
+].map(cmd => cmd.toJSON());
 
 discordClient.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
     const { commandName, options } = interaction;
 
-    if (commandName === 'lisans-olustur') {
-        const gun = options.getInteger('gun');
-        const key = `KEY-${crypto.randomBytes(4).toString('hex').toUpperCase()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
-        await License.create({ key, days: gun, createdBy: interaction.user.tag });
-        const embed = new EmbedBuilder()
-            .setTitle('🔑 Yeni Lisans Oluşturuldu')
-            .setColor(0x2ecc71)
-            .addFields(
-                { name: 'Lisans Anahtarı', value: `\`${key}\``, inline: false },
-                { name: 'Süre', value: `${gun} Gün`, inline: true },
-                { name: 'Kural', value: '1 Cihaz / Max 2 Hesap', inline: true }
-            );
-        return interaction.reply({ embeds: [embed] });
-    }
-
-    if (commandName === 'lisans-bilgi') {
-        const key     = options.getString('anahtar').trim().toUpperCase();
-        const license = await License.findOne({ key });
-        if (!license) return interaction.reply({ content: '❌ Lisans bulunamadı.', ephemeral: true });
-
-        const now = new Date();
-        let durum = '🟢 Aktif';
-        let kalanMetin = 'Bilinmiyor';
-        let countdownLive = '';
-
-        if (!license.activatedAt) {
-            durum = '🟡 Beklemede (Henüz Aktive Edilmedi)';
-            kalanMetin = `${license.days} Gün`;
-            countdownLive = 'Oyun içinde giriş yapılınca başlar';
-        } else if (license.expiresAt) {
-            const diffMs = new Date(license.expiresAt).getTime() - now.getTime();
-            if (diffMs > 0) {
-                const days    = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-                const hours   = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
-                const minutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
-                const seconds = Math.floor((diffMs % (1000 * 60)) / 1000);
-
-                kalanMetin = `${days}g ${hours}s ${minutes}d ${seconds}sn`;
-                countdownLive = `<t:${Math.floor(license.expiresAt.getTime() / 1000)}:R>`;
-            } else {
-                durum = '🔴 Süresi Doldu';
-                kalanMetin = '0g 0s 0d 0sn';
-                countdownLive = 'Süre bitti';
-            }
+    try {
+        if (commandName === 'lisans-olustur') {
+            const gun = options.getInteger('gun');
+            const key = `KEY-${crypto.randomBytes(4).toString('hex').toUpperCase()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+            await License.create({ key, days: gun, createdBy: interaction.user.tag });
+            const embed = new EmbedBuilder()
+                .setTitle('🔑 Yeni Lisans Oluşturuldu')
+                .setColor(0x2ecc71)
+                .addFields(
+                    { name: 'Lisans Anahtarı', value: `\`${key}\``, inline: false },
+                    { name: 'Süre', value: `${gun} Gün`, inline: true },
+                    { name: 'Kural', value: '1 Cihaz / Max 2 Hesap', inline: true }
+                );
+            return interaction.reply({ embeds: [embed] });
         }
 
-        const hesaplar = (license.allowedAccounts && license.allowedAccounts.length > 0)
-                     ? license.allowedAccounts.join(', ')
-                     : 'Henüz hesap kaydedilmedi';
+        if (commandName === 'lisans-bilgi') {
+            const key     = options.getString('anahtar').trim().toUpperCase();
+            const license = await License.findOne({ key });
+            if (!license) return interaction.reply({ content: '❌ Lisans bulunamadı.', ephemeral: true });
 
-        const embed = new EmbedBuilder()
-            .setTitle('📄 Lisans Bilgileri & Canlı Sayaç')
-            .setColor(0x3498db)
-            .addFields(
-                { name: '🔑 Anahtar', value: `\`${license.key}\``, inline: false },
-                { name: '📊 Durum', value: durum, inline: true },
-                { name: '⏱️ Kalan Süre', value: `\`${kalanMetin}\``, inline: true },
-                { name: '⏳ Canlı Sayaç', value: countdownLive, inline: true },
-                { name: '🔒 HWID Kilidi', value: license.hwid ? '🔒 Kilitli' : '🔓 Serbest', inline: true },
-                { name: '👥 Kayıtlı Hesaplar (Max 2)', value: `\`${hesaplar}\``, inline: false }
-            )
-            .setFooter({ text: 'AutoMarket Lisans Yönetimi' })
-            .setTimestamp();
+            const now = new Date();
+            let durum = '🟢 Aktif';
+            let kalanMetin = 'Bilinmiyor';
+            let countdownLive = '';
 
-        return interaction.reply({ embeds: [embed] });
-    }
+            if (!license.activatedAt) {
+                durum = '🟡 Beklemede (Henüz Aktive Edilmedi)';
+                kalanMetin = `${license.days} Gün`;
+                countdownLive = 'Oyun içinde giriş yapılınca başlar';
+            } else if (license.expiresAt) {
+                const diffMs = new Date(license.expiresAt).getTime() - now.getTime();
+                if (diffMs > 0) {
+                    const days    = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+                    const hours   = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+                    const minutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+                    const seconds = Math.floor((diffMs % (1000 * 60)) / 1000);
 
-    if (commandName === 'hwid-sifirla') {
-        const key = options.getString('anahtar').trim().toUpperCase();
-        await License.findOneAndUpdate({ key }, { hwid: null, allowedAccounts: [] });
-        return interaction.reply({ content: `\`${key}\` cihaz kilidi ve kayıtlı hesapları sıfırlandı.`, ephemeral: true });
-    }
+                    kalanMetin = `${days}g ${hours}s ${minutes}d ${seconds}sn`;
+                    countdownLive = `<t:${Math.floor(license.expiresAt.getTime() / 1000)}:R>`;
+                } else {
+                    durum = '🔴 Süresi Doldu';
+                    kalanMetin = '0g 0s 0d 0sn';
+                    countdownLive = 'Süre bitti';
+                }
+            }
 
-    if (commandName === 'lisans-sil') {
-        const key = options.getString('anahtar').trim().toUpperCase();
-        await License.findOneAndDelete({ key });
-        return interaction.reply({ content: `\`${key}\` silindi.`, ephemeral: true });
-    }
+            const hesaplar = (license.allowedAccounts && license.allowedAccounts.length > 0)
+                         ? license.allowedAccounts.join(', ')
+                         : 'Henüz hesap kaydedilmedi';
 
-    if (commandName === 'guncelleme-ayarla') {
-        const surum = options.getString('surum').trim();
-        const link  = options.getString('link').trim();
-        await Config.findOneAndUpdate(
-            { key: 'mod_config' },
-            { latestVersion: surum, downloadUrl: link },
-            { upsert: true }
-        );
-        const embed = new EmbedBuilder()
-            .setTitle('🚀 Güncelleme Kaydedildi')
-            .setColor(0x9b59b6)
-            .addFields(
-                { name: 'Yeni Sürüm', value: `\`${surum}\``, inline: true },
-                { name: 'İndirme Linki', value: `[Dosyayı Gör](${link})`, inline: false }
+            const embed = new EmbedBuilder()
+                .setTitle('📄 Lisans Bilgileri & Canlı Sayaç')
+                .setColor(0x3498db)
+                .addFields(
+                    { name: '🔑 Anahtar', value: `\`${license.key}\``, inline: false },
+                    { name: '📊 Durum', value: durum, inline: true },
+                    { name: '⏱️ Kalan Süre', value: `\`${kalanMetin}\``, inline: true },
+                    { name: '⏳ Canlı Sayaç', value: countdownLive, inline: true },
+                    { name: '🔒 HWID Kilidi', value: license.hwid ? '🔒 Kilitli' : '🔓 Serbest', inline: true },
+                    { name: '👥 Kayıtlı Hesaplar (Max 2)', value: `\`${hesaplar}\``, inline: false }
+                )
+                .setFooter({ text: 'AutoMarket Lisans Yönetimi' })
+                .setTimestamp();
+
+            return interaction.reply({ embeds: [embed] });
+        }
+
+        if (commandName === 'hwid-sifirla') {
+            const key = options.getString('anahtar').trim().toUpperCase();
+            await License.findOneAndUpdate({ key }, { hwid: null, allowedAccounts: [] });
+            return interaction.reply({ content: `\`${key}\` cihaz kilidi ve kayıtlı hesapları sıfırlandı.`, ephemeral: true });
+        }
+
+        if (commandName === 'lisans-sil') {
+            const key = options.getString('anahtar').trim().toUpperCase();
+            await License.findOneAndDelete({ key });
+            return interaction.reply({ content: `\`${key}\` silindi.`, ephemeral: true });
+        }
+
+        if (commandName === 'guncelleme-ayarla') {
+            const surum = options.getString('surum').trim();
+            const link  = options.getString('link').trim();
+            await Config.findOneAndUpdate(
+                { key: 'mod_config' },
+                { latestVersion: surum, downloadUrl: link },
+                { upsert: true }
             );
-        return interaction.reply({ embeds: [embed] });
+            const embed = new EmbedBuilder()
+                .setTitle('🚀 Güncelleme Kaydedildi')
+                .setColor(0x9b59b6)
+                .addFields(
+                    { name: 'Yeni Sürüm', value: `\`${surum}\``, inline: true },
+                    { name: 'İndirme Linki', value: `[Dosyayı Gör](${link})`, inline: false }
+                );
+            return interaction.reply({ embeds: [embed] });
+        }
+    } catch (cmdErr) {
+        console.error('Komut çalıştırma hatası:', cmdErr);
+        if (!interaction.replied && !interaction.deferred) {
+            return interaction.reply({ content: '❌ Komut işlenirken bir hata oluştu.', ephemeral: true });
+        }
     }
 });
 
 async function startServer() {
-    const mongoUri     = process.env.MONGODB_URI || process.env.MONGO_URI;
-    const discordToken = process.env.DISCORD_TOKEN || process.env.TOKEN;
-    const clientId     = process.env.CLIENT_ID;
+    try {
+        const mongoUri     = process.env.MONGODB_URI || process.env.MONGO_URI;
+        const discordToken = process.env.DISCORD_TOKEN || process.env.TOKEN;
+        const clientId     = process.env.CLIENT_ID;
 
-    await mongoose.connect(mongoUri);
-    app.listen(PORT, () => console.log(`API ${PORT} portunda aktif.`));
+        if (mongoUri) {
+            await mongoose.connect(mongoUri);
+            console.log('[Mongo] Veritabanı bağlandı.');
+        }
 
-    const rest = new REST({ version: '10' }).setToken(discordToken);
-    await rest.put(Routes.applicationCommands(clientId), { body: commands });
-    await discordClient.login(discordToken);
+        app.listen(PORT, () => console.log(`API ${PORT} portunda aktif.`));
+
+        if (discordToken && clientId) {
+            const rest = new REST({ version: '10' }).setToken(discordToken);
+            console.log('[Discord] Slash komutları kaydediliyor...');
+            await rest.put(Routes.applicationCommands(clientId), { body: commands });
+            console.log('[Discord] Slash komutları başarıyla kaydedildi.');
+            await discordClient.login(discordToken);
+            console.log('[Discord] Bot giriş yaptı.');
+        }
+    } catch (err) {
+        console.error('[Başlatma Hatası]:', err);
+    }
 }
 
 startServer();
