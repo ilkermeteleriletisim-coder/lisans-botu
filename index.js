@@ -151,25 +151,30 @@ const commands = [
     new SlashCommandBuilder()
         .setName('lisans-olustur')
         .setDescription('Yeni bir lisans anahtarı üretir')
-        .addIntegerOption(opt => opt.setName('gun').setDescription('Süre (Gün)').setRequired(true)),
+        .addIntegerOption(opt => opt.setName('gun').setDescription('Süre (Gün)').setRequired(true))
+        .toJSON(),
     new SlashCommandBuilder()
         .setName('lisans-bilgi')
         .setDescription('Lisans durumunu ve kalan süreyi detaylı sorgular')
-        .addStringOption(opt => opt.setName('anahtar').setDescription('Lisans Anahtarı').setRequired(true)),
+        .addStringOption(opt => opt.setName('anahtar').setDescription('Lisans Anahtarı').setRequired(true))
+        .toJSON(),
     new SlashCommandBuilder()
         .setName('lisans-sil')
         .setDescription('Lisansı veritabanından siler')
-        .addStringOption(opt => opt.setName('anahtar').setDescription('Lisans Anahtarı').setRequired(true)),
+        .addStringOption(opt => opt.setName('anahtar').setDescription('Lisans Anahtarı').setRequired(true))
+        .toJSON(),
     new SlashCommandBuilder()
         .setName('hwid-sifirla')
         .setDescription('Donanım kilidini ve kayıtlı hesapları sıfırlar')
-        .addStringOption(opt => opt.setName('anahtar').setDescription('Lisans Anahtarı').setRequired(true)),
+        .addStringOption(opt => opt.setName('anahtar').setDescription('Lisans Anahtarı').setRequired(true))
+        .toJSON(),
     new SlashCommandBuilder()
         .setName('guncelleme-ayarla')
         .setDescription('Modun yeni sürümünü ve indirme linkini belirler')
         .addStringOption(opt => opt.setName('surum').setDescription('Örn: 1.0.1').setRequired(true))
         .addStringOption(opt => opt.setName('link').setDescription('Yeni .jar linki').setRequired(true))
-].map(cmd => cmd.toJSON());
+        .toJSON()
+];
 
 discordClient.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
