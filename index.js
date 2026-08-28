@@ -9,9 +9,6 @@ app.use(express.json());
 const PORT = process.env.PORT || 10000;
 const HMAC_SECRET = process.env.HMAC_SECRET;
 
-// Entegre edilen merkezi Discord Webhook URL'i
-const SALES_WEBHOOK_URL = process.env.DISCORD_SALES_WEBHOOK || 'https://discord.com/api/webhooks/1541881631122399325/ANu-qsMDWAf_n2LHJE6Q9eSP36WohtTZiE8K8mZcjX0JwDuPHEPCsIotom5fyFrDwxmm';
-
 if (!HMAC_SECRET) {
     console.error('[GÜVENLİK] UYARI: HMAC_SECRET ortam değişkeni tanımlı değil!');
 }
@@ -35,7 +32,7 @@ const licenseSchema = new mongoose.Schema({
     activatedAt: { type: Date, default: null },
     expiresAt: { type: Date, default: null },
     hwid: { type: String, default: null },
-    allowedAccounts: { type: [String], default: [] }, // Maksimum 2 hesap sınırı
+    allowedAccounts: { type: [String], default: [] },
     createdBy: { type: String, required: true },
     status: { type: String, default: 'active' }
 });
@@ -47,16 +44,8 @@ const configSchema = new mongoose.Schema({
     forceUpdate: { type: Boolean, default: true }
 });
 
-const saleSchema = new mongoose.Schema({
-    licenseKey: { type: String, required: true, index: true },
-    itemName: { type: String, default: 'Bilinmeyen' },
-    sellPrice: { type: Number, required: true },
-    createdAt: { type: Date, default: Date.now }
-});
-
 const License = mongoose.model('License', licenseSchema);
 const Config  = mongoose.model('Config', configSchema);
-const Sale    = mongoose.model('Sale', saleSchema);
 
 // ── API: SÜRÜM & GÜNCELLEME KONTROLÜ ─────────────────────────────────────
 app.get('/api/version', async (req, res) => {
@@ -72,101 +61,6 @@ app.get('/api/version', async (req, res) => {
         });
     } catch (err) {
         return res.status(500).json({ error: 'Sunucu hatasi' });
-    }
-});
-
-// ── API: MERKEZİ SATIŞ WEBHOOK BİLDİRİMİ ─────────────────────────────────
-app.post('/api/notify-sale', async (req, res) => {
-    try {
-        const { licenseKey, playerName, itemName, sellPrice } = req.body;
-        
-        // Gönderilen key bilgisi (playerName veya licenseKey parametresinden)
-        const rawKey = licenseKey || playerName;
-        const cleanKey = rawKey ? rawKey.trim().toUpperCase() : 'BILINMEYEN-KEY';
-        const price = Number(sellPrice) || 0;
-
-        // Fiyat 0 veya negatifse Discord'a boş mesaj atmayı engelle
-        if (price <= 0) {
-            return res.status(400).json({ error: 'Geçersiz fiyat verisi' });
-        }
-
-        // 1. Satışı veritabanına kaydet
-        await Sale.create({
-            licenseKey: cleanKey,
-            itemName: itemName || 'Bilinmeyen Eşya',
-            sellPrice: price
-        });
-
-        // 2. Bugünün toplam satışını hesapla (Bugün 00:00'dan itibaren)
-        const startOfToday = new Date();
-        startOfToday.setHours(0, 0, 0, 0);
-
-        const todayAgg = await Sale.aggregate([
-            { $match: { licenseKey: cleanKey, createdAt: { $gte: startOfToday } } },
-            { $group: { _id: null, total: { $sum: '$sellPrice' } } }
-        ]);
-        const calculatedTodayProfit = todayAgg.length > 0 ? todayAgg[0].total : price;
-
-        // 3. Tüm zamanların toplam satışını hesapla
-        const totalAgg = await Sale.aggregate([
-            { $match: { licenseKey: cleanKey } },
-            { $group: { _id: null, total: { $sum: '$sellPrice' } } }
-        ]);
-        const calculatedTotalProfit = totalAgg.length > 0 ? totalAgg[0].total : price;
-
-        // 4. Lisans Süresini ve Durumunu Kontrol Et
-        let licenseTimeText = "Bilinmiyor";
-        const lic = await License.findOne({ key: cleanKey });
-        if (lic) {
-            if (!lic.activatedAt) {
-                licenseTimeText = `${lic.days} Gün (Beklemede)`;
-            } else if (lic.expiresAt) {
-                const diffMs = new Date(lic.expiresAt).getTime() - Date.now();
-                if (diffMs > 0) {
-                    const days = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-                    const hours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
-                    licenseTimeText = `${days}g ${hours}s`;
-                } else {
-                    licenseTimeText = "Süresi Doldu";
-                }
-            } else {
-                licenseTimeText = "Süresiz";
-            }
-        }
-
-        // 5. Discord Webhook Embed Gönderimi
-        const webhookUrl = process.env.DISCORD_SALES_WEBHOOK || SALES_WEBHOOK_URL;
-        if (webhookUrl) {
-            const payload = {
-                embeds: [{
-                    title: "💰 Satış Gerçekleşti!",
-                    color: 0x2ECC71,
-                    fields: [
-                        { name: "👤 Oyuncu", value: `\`${cleanKey}\``, inline: true },
-                        { name: "📦 Eşya", value: String(itemName || "Bilinmeyen"), inline: true },
-                        { name: "💵 Satış Fiyatı", value: `$${price.toLocaleString()}`, inline: true },
-                        { name: "🛒 Alış Maliyeti", value: "$0", inline: true },
-                        { name: "📈 Net Kar", value: `+$${price.toLocaleString()}`, inline: true },
-                        { name: "📅 Bugün Toplam", value: `+$${calculatedTodayProfit.toLocaleString()}`, inline: true },
-                        { name: "🏆 Tüm Zamanlar", value: `+$${calculatedTotalProfit.toLocaleString()}`, inline: false },
-                        { name: "⏱️ Lisans Kalan", value: licenseTimeText, inline: true }
-                    ],
-                    footer: { text: "AutoMarket Merkezi Panel • DonutSMP" },
-                    timestamp: new Date().toISOString()
-                }]
-            };
-
-            fetch(webhookUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            }).catch(e => console.error('[Webhook] Gönderim Hatası:', e));
-        }
-
-        return res.json({ success: true });
-    } catch (err) {
-        console.error('[/api/notify-sale] Hata:', err);
-        return res.status(500).json({ error: 'Webhook hatasi' });
     }
 });
 
@@ -261,7 +155,7 @@ const commands = [
         .toJSON(),
     new SlashCommandBuilder()
         .setName('lisans-bilgi')
-        .setDescription('Lisans durumunu sorgular')
+        .setDescription('Lisans durumunu ve kalan süreyi detaylı sorgular')
         .addStringOption(opt => opt.setName('anahtar').setDescription('Lisans Anahtarı').setRequired(true))
         .toJSON(),
     new SlashCommandBuilder()
@@ -306,27 +200,50 @@ discordClient.on('interactionCreate', async interaction => {
         const license = await License.findOne({ key });
         if (!license) return interaction.reply({ content: '❌ Lisans bulunamadı.', ephemeral: true });
 
-        const now    = new Date();
-        const durum  = !license.activatedAt ? '🟡 Beklemede'
-                     : now > license.expiresAt ? '🔴 Bitti'
-                     : '🟢 Aktif';
-        const kalan  = license.expiresAt
-                     ? `<t:${Math.floor(license.expiresAt.getTime() / 1000)}:R>`
-                     : 'Bilinmiyor';
+        const now = new Date();
+        let durum = '🟢 Aktif';
+        let kalanMetin = 'Bilinmiyor';
+        let countdownLive = '';
+
+        if (!license.activatedAt) {
+            durum = '🟡 Beklemede (Henüz Aktive Edilmedi)';
+            kalanMetin = `${license.days} Gün`;
+            countdownLive = 'Oyun içinde giriş yapılınca başlar';
+        } else if (license.expiresAt) {
+            const diffMs = new Date(license.expiresAt).getTime() - now.getTime();
+            if (diffMs > 0) {
+                const days    = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+                const hours   = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+                const minutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+                const seconds = Math.floor((diffMs % (1000 * 60)) / 1000);
+
+                kalanMetin = `${days}g ${hours}s ${minutes}d ${seconds}sn`;
+                countdownLive = `<t:${Math.floor(license.expiresAt.getTime() / 1000)}:R>`;
+            } else {
+                durum = '🔴 Süresi Doldu';
+                kalanMetin = '0g 0s 0d 0sn';
+                countdownLive = 'Süre bitti';
+            }
+        }
+
         const hesaplar = (license.allowedAccounts && license.allowedAccounts.length > 0)
                      ? license.allowedAccounts.join(', ')
                      : 'Henüz hesap kaydedilmedi';
 
         const embed = new EmbedBuilder()
-            .setTitle('📄 Lisans Bilgileri')
+            .setTitle('📄 Lisans Bilgileri & Canlı Sayaç')
             .setColor(0x3498db)
             .addFields(
-                { name: 'Anahtar', value: `\`${license.key}\`` },
-                { name: 'Durum', value: durum, inline: true },
-                { name: 'Kalan Süre', value: kalan, inline: true },
-                { name: 'HWID Kilitli', value: license.hwid ? '🔒 Evet' : '🔓 Hayır', inline: true },
-                { name: 'Kayıtlı Hesaplar (Max 2)', value: `\`${hesaplar}\``, inline: false }
-            );
+                { name: '🔑 Anahtar', value: `\`${license.key}\``, inline: false },
+                { name: '📊 Durum', value: durum, inline: true },
+                { name: '⏱️ Kalan Süre', value: `\`${kalanMetin}\``, inline: true },
+                { name: '⏳ Canlı Sayaç', value: countdownLive, inline: true },
+                { name: '🔒 HWID Kilidi', value: license.hwid ? '🔒 Kilitli' : '🔓 Serbest', inline: true },
+                { name: '👥 Kayıtlı Hesaplar (Max 2)', value: `\`${hesaplar}\``, inline: false }
+            )
+            .setFooter({ text: 'AutoMarket Lisans Yönetimi' })
+            .setTimestamp();
+
         return interaction.reply({ embeds: [embed] });
     }
 
