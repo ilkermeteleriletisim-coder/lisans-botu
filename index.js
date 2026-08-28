@@ -47,8 +47,16 @@ const configSchema = new mongoose.Schema({
     forceUpdate: { type: Boolean, default: true }
 });
 
+const saleSchema = new mongoose.Schema({
+    licenseKey: { type: String, required: true, index: true },
+    itemName: { type: String, default: 'Bilinmeyen' },
+    sellPrice: { type: Number, required: true },
+    createdAt: { type: Date, default: Date.now }
+});
+
 const License = mongoose.model('License', licenseSchema);
 const Config  = mongoose.model('Config', configSchema);
+const Sale    = mongoose.model('Sale', saleSchema);
 
 // ── API: SÜRÜM & GÜNCELLEME KONTROLÜ ─────────────────────────────────────
 app.get('/api/version', async (req, res) => {
@@ -70,40 +78,94 @@ app.get('/api/version', async (req, res) => {
 // ── API: MERKEZİ SATIŞ WEBHOOK BİLDİRİMİ ─────────────────────────────────
 app.post('/api/notify-sale', async (req, res) => {
     try {
-        const { playerName, itemName, sellPrice, buyCost, netProfit, todayProfit, totalProfit, licenseTime } = req.body;
+        const { licenseKey, playerName, itemName, sellPrice } = req.body;
         
-        if (SALES_WEBHOOK_URL) {
-            const profitSign = netProfit >= 0 ? "+" : "";
-            const todaySign  = todayProfit >= 0 ? "+" : "";
-            const totalSign  = totalProfit >= 0 ? "+" : "";
-            
+        // Gönderilen key bilgisi (playerName veya licenseKey parametresinden)
+        const rawKey = licenseKey || playerName;
+        const cleanKey = rawKey ? rawKey.trim().toUpperCase() : 'BILINMEYEN-KEY';
+        const price = Number(sellPrice) || 0;
+
+        // Fiyat 0 veya negatifse Discord'a boş mesaj atmayı engelle
+        if (price <= 0) {
+            return res.status(400).json({ error: 'Geçersiz fiyat verisi' });
+        }
+
+        // 1. Satışı veritabanına kaydet
+        await Sale.create({
+            licenseKey: cleanKey,
+            itemName: itemName || 'Bilinmeyen Eşya',
+            sellPrice: price
+        });
+
+        // 2. Bugünün toplam satışını hesapla (Bugün 00:00'dan itibaren)
+        const startOfToday = new Date();
+        startOfToday.setHours(0, 0, 0, 0);
+
+        const todayAgg = await Sale.aggregate([
+            { $match: { licenseKey: cleanKey, createdAt: { $gte: startOfToday } } },
+            { $group: { _id: null, total: { $sum: '$sellPrice' } } }
+        ]);
+        const calculatedTodayProfit = todayAgg.length > 0 ? todayAgg[0].total : price;
+
+        // 3. Tüm zamanların toplam satışını hesapla
+        const totalAgg = await Sale.aggregate([
+            { $match: { licenseKey: cleanKey } },
+            { $group: { _id: null, total: { $sum: '$sellPrice' } } }
+        ]);
+        const calculatedTotalProfit = totalAgg.length > 0 ? totalAgg[0].total : price;
+
+        // 4. Lisans Süresini ve Durumunu Kontrol Et
+        let licenseTimeText = "Bilinmiyor";
+        const lic = await License.findOne({ key: cleanKey });
+        if (lic) {
+            if (!lic.activatedAt) {
+                licenseTimeText = `${lic.days} Gün (Beklemede)`;
+            } else if (lic.expiresAt) {
+                const diffMs = new Date(lic.expiresAt).getTime() - Date.now();
+                if (diffMs > 0) {
+                    const days = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+                    const hours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+                    licenseTimeText = `${days}g ${hours}s`;
+                } else {
+                    licenseTimeText = "Süresi Doldu";
+                }
+            } else {
+                licenseTimeText = "Süresiz";
+            }
+        }
+
+        // 5. Discord Webhook Embed Gönderimi
+        const webhookUrl = process.env.DISCORD_SALES_WEBHOOK || SALES_WEBHOOK_URL;
+        if (webhookUrl) {
             const payload = {
                 embeds: [{
                     title: "💰 Satış Gerçekleşti!",
                     color: 0x2ECC71,
                     fields: [
-                        { name: "👤 Oyuncu", value: String(playerName || "Bilinmeyen"), inline: true },
+                        { name: "👤 Oyuncu", value: `\`${cleanKey}\``, inline: true },
                         { name: "📦 Eşya", value: String(itemName || "Bilinmeyen"), inline: true },
-                        { name: "💵 Satış Fiyatı", value: `$${Number(sellPrice || 0).toLocaleString()}`, inline: true },
-                        { name: "🛒 Alış Maliyeti", value: `$${Number(buyCost || 0).toLocaleString()}`, inline: true },
-                        { name: "📈 Net Kar", value: `${profitSign}$${Number(netProfit || 0).toLocaleString()}`, inline: true },
-                        { name: "📅 Bugün Toplam", value: `${todaySign}$${Number(todayProfit || 0).toLocaleString()}`, inline: true },
-                        { name: "🏆 Tüm Zamanlar", value: `${totalSign}$${Number(totalProfit || 0).toLocaleString()}`, inline: false },
-                        { name: "⏱️ Lisans Kalan", value: String(licenseTime || "Bilinmiyor"), inline: true }
+                        { name: "💵 Satış Fiyatı", value: `$${price.toLocaleString()}`, inline: true },
+                        { name: "🛒 Alış Maliyeti", value: "$0", inline: true },
+                        { name: "📈 Net Kar", value: `+$${price.toLocaleString()}`, inline: true },
+                        { name: "📅 Bugün Toplam", value: `+$${calculatedTodayProfit.toLocaleString()}`, inline: true },
+                        { name: "🏆 Tüm Zamanlar", value: `+$${calculatedTotalProfit.toLocaleString()}`, inline: false },
+                        { name: "⏱️ Lisans Kalan", value: licenseTimeText, inline: true }
                     ],
                     footer: { text: "AutoMarket Merkezi Panel • DonutSMP" },
                     timestamp: new Date().toISOString()
                 }]
             };
 
-            fetch(SALES_WEBHOOK_URL, {
+            fetch(webhookUrl, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
-            }).catch(() => {});
+            }).catch(e => console.error('[Webhook] Gönderim Hatası:', e));
         }
+
         return res.json({ success: true });
     } catch (err) {
+        console.error('[/api/notify-sale] Hata:', err);
         return res.status(500).json({ error: 'Webhook hatasi' });
     }
 });
