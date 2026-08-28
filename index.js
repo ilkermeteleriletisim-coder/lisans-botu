@@ -8,11 +8,30 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 
+// ── HMAC İmza Sistemi ──────────────────────────────────────────────────────
+// Render'da HMAC_SECRET environment variable olarak ayarla
+const HMAC_SECRET = process.env.HMAC_SECRET;
+if (!HMAC_SECRET) {
+    console.error('[GÜVENLİK] UYARI: HMAC_SECRET ortam değişkeni tanımlı değil!');
+}
+
+/**
+ * /api/verify yanıtlarını imzalar.
+ * payload: licenseKey + "|" + valid + "|" + expiresAt (ISO string veya "null")
+ */
+function signResponse(licenseKey, valid, expiresAt) {
+    if (!HMAC_SECRET) return 'NO_SECRET';
+    const expStr = expiresAt ? new Date(expiresAt).toISOString() : 'null';
+    const payload = `${licenseKey.trim().toUpperCase()}|${valid}|${expStr}`;
+    return crypto.createHmac('sha256', HMAC_SECRET).update(payload).digest('hex');
+}
+
+// ── ANASAYFA ───────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
     res.send('Lisans ve Guncelleme Sunucusu Calisiyor.');
 });
 
-// --- VERİTABANI ŞEMALARI ---
+// ── VERİTABANI ŞEMALARI ───────────────────────────────────────────────────
 const licenseSchema = new mongoose.Schema({
     key: { type: String, required: true, unique: true },
     days: { type: Number, required: true },
@@ -32,9 +51,9 @@ const configSchema = new mongoose.Schema({
 });
 
 const License = mongoose.model('License', licenseSchema);
-const Config = mongoose.model('Config', configSchema);
+const Config  = mongoose.model('Config', configSchema);
 
-// --- API: SÜRÜM & GÜNCELLEME KONTROLÜ ---
+// ── API: SÜRÜM & GÜNCELLEME KONTROLÜ ─────────────────────────────────────
 app.get('/api/version', async (req, res) => {
     try {
         let conf = await Config.findOne({ key: 'mod_config' });
@@ -51,43 +70,62 @@ app.get('/api/version', async (req, res) => {
     }
 });
 
-// --- API: LİSANS DOĞRULAMA ---
+// ── API: LİSANS DOĞRULAMA (HMAC İMZALI) ─────────────────────────────────
 app.post('/api/verify', async (req, res) => {
     try {
         const { licenseKey, hwid } = req.body;
-        if (!licenseKey) return res.status(400).json({ valid: false, message: 'Lisans anahtari gerekli.' });
+        if (!licenseKey) {
+            const sig = signResponse('', false, null);
+            return res.status(400).json({ valid: false, message: 'Lisans anahtari gerekli.', signature: sig });
+        }
 
         const cleanKey = licenseKey.trim().toUpperCase();
-        const license = await License.findOne({ key: cleanKey });
-        if (!license) return res.status(404).json({ valid: false, message: 'Gecersiz lisans.' });
+        const license  = await License.findOne({ key: cleanKey });
+
+        if (!license) {
+            const sig = signResponse(cleanKey, false, null);
+            return res.status(404).json({ valid: false, message: 'Gecersiz lisans.', signature: sig });
+        }
 
         const now = new Date();
+
+        // Süresi dolmuş mu?
         if (license.expiresAt && now > license.expiresAt) {
             license.status = 'expired';
             await license.save();
-            return res.status(403).json({ valid: false, message: 'Lisans suresi dolmus.' });
+            const sig = signResponse(cleanKey, false, license.expiresAt);
+            return res.status(403).json({ valid: false, message: 'Lisans suresi dolmus.', expiresAt: license.expiresAt, signature: sig });
         }
 
+        // İlk aktivasyon
         if (!license.activatedAt) {
             license.activatedAt = now;
-            license.expiresAt = new Date(now.getTime() + license.days * 24 * 60 * 60 * 1000);
-            license.hwid = hwid || null;
+            license.expiresAt   = new Date(now.getTime() + license.days * 24 * 60 * 60 * 1000);
+            license.hwid        = hwid || null;
             await license.save();
-            return res.json({ valid: true, message: 'Lisans aktive edildi.', expiresAt: license.expiresAt });
+            const sig = signResponse(cleanKey, true, license.expiresAt);
+            return res.json({ valid: true, message: 'Lisans aktive edildi.', expiresAt: license.expiresAt, signature: sig });
         }
 
+        // HWID kilit kontrolü
         if (license.hwid && hwid && license.hwid !== hwid) {
-            return res.status(403).json({ valid: false, message: 'Baska cihaza bagli.' });
+            const sig = signResponse(cleanKey, false, null);
+            return res.status(403).json({ valid: false, message: 'Baska cihaza bagli.', signature: sig });
         }
 
-        return res.json({ valid: true, message: 'Lisans gecerli.', expiresAt: license.expiresAt });
+        // Geçerli lisans
+        const sig = signResponse(cleanKey, true, license.expiresAt);
+        return res.json({ valid: true, message: 'Lisans gecerli.', expiresAt: license.expiresAt, signature: sig });
+
     } catch (error) {
-        return res.status(500).json({ valid: false, message: 'Sunucu hatasi.' });
+        console.error('[/api/verify] Hata:', error);
+        const sig = signResponse(req.body?.licenseKey || '', false, null);
+        return res.status(500).json({ valid: false, message: 'Sunucu hatasi.', signature: sig });
     }
 });
 
-// --- DISCORD KOMUTLARI ---
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+// ── DISCORD KOMUTLARI ─────────────────────────────────────────────────────
+const discordClient = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 const commands = [
     new SlashCommandBuilder()
@@ -118,20 +156,18 @@ const commands = [
         .toJSON()
 ];
 
-client.on('interactionCreate', async interaction => {
+discordClient.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
     const { commandName, options } = interaction;
 
     if (commandName === 'guncelleme-ayarla') {
         const surum = options.getString('surum').trim();
-        const link = options.getString('link').trim();
-
+        const link  = options.getString('link').trim();
         await Config.findOneAndUpdate(
             { key: 'mod_config' },
             { latestVersion: surum, downloadUrl: link },
             { upsert: true }
         );
-
         const embed = new EmbedBuilder()
             .setTitle('🚀 Yeni Güncelleme Yayında!')
             .setColor(0x9b59b6)
@@ -140,7 +176,6 @@ client.on('interactionCreate', async interaction => {
                 { name: 'İndirme Linki', value: `[Dosyayı Gör](${link})`, inline: false }
             )
             .setTimestamp();
-
         return interaction.reply({ embeds: [embed] });
     }
 
@@ -148,7 +183,6 @@ client.on('interactionCreate', async interaction => {
         const gun = options.getInteger('gun');
         const key = `KEY-${crypto.randomBytes(4).toString('hex').toUpperCase()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
         await License.create({ key, days: gun, createdBy: interaction.user.tag });
-
         const embed = new EmbedBuilder()
             .setTitle('🔑 Yeni Lisans Oluşturuldu')
             .setColor(0x2ecc71)
@@ -160,16 +194,26 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (commandName === 'lisans-bilgi') {
-        const key = options.getString('anahtar').trim().toUpperCase();
+        const key     = options.getString('anahtar').trim().toUpperCase();
         const license = await License.findOne({ key });
         if (!license) return interaction.reply({ content: '❌ Lisans bulunamadı.', ephemeral: true });
+
+        const now    = new Date();
+        const durum  = !license.activatedAt ? '🟡 Beklemede'
+                     : now > license.expiresAt ? '🔴 Bitti'
+                     : '🟢 Aktif';
+        const kalan  = license.expiresAt
+                     ? `<t:${Math.floor(license.expiresAt.getTime() / 1000)}:R>`
+                     : 'Bilinmiyor';
 
         const embed = new EmbedBuilder()
             .setTitle('📄 Lisans Bilgileri')
             .setColor(0x3498db)
             .addFields(
                 { name: 'Anahtar', value: `\`${license.key}\`` },
-                { name: 'Durum', value: license.activatedAt ? (new Date() > license.expiresAt ? '🔴 Bitti' : '🟢 Aktif') : '🟡 Beklemede' }
+                { name: 'Durum', value: durum, inline: true },
+                { name: 'Kalan Süre', value: kalan, inline: true },
+                { name: 'HWID Bağlı', value: license.hwid ? '🔒 Evet' : '🔓 Hayır', inline: true }
             );
         return interaction.reply({ embeds: [embed] });
     }
@@ -187,17 +231,18 @@ client.on('interactionCreate', async interaction => {
     }
 });
 
+// ── BAŞLATMA ───────────────────────────────────────────────────────────────
 async function startServer() {
-    const mongoUri = process.env.MONGODB_URI || process.env.MONGO_URI;
+    const mongoUri     = process.env.MONGODB_URI || process.env.MONGO_URI;
     const discordToken = process.env.DISCORD_TOKEN || process.env.TOKEN;
-    const clientId = process.env.CLIENT_ID;
+    const clientId     = process.env.CLIENT_ID;
 
     await mongoose.connect(mongoUri);
     app.listen(PORT, () => console.log(`API ${PORT} portunda aktif.`));
 
     const rest = new REST({ version: '10' }).setToken(discordToken);
     await rest.put(Routes.applicationCommands(clientId), { body: commands });
-    await client.login(discordToken);
+    await discordClient.login(discordToken);
 }
 
 startServer();
